@@ -875,9 +875,19 @@ static int do_apply(ApplyCtx *ctx) {
         if (p_deg) drmModeAtomicAddProperty(req, crtc_id, p_deg, reset ? 0 : deg_blob);
         if (p_ctm) drmModeAtomicAddProperty(req, crtc_id, p_ctm, reset ? 0 : ctm_blob);
         if (p_gam) drmModeAtomicAddProperty(req, crtc_id, p_gam, reset ? 0 : gam_blob);
-        ret = drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_NONBLOCK, NULL);
-        printf("AMD/Intel color pipeline commit ret=%d  errno=%d (%s)\n",
-               ret, errno, ret ? strerror(errno) : "ok");
+        /* Dry-run first: TEST_ONLY validates the whole atomic state without
+         * touching the screen, so a rejected pipeline fails cleanly instead of
+         * flashing or wedging the CRTC. */
+        int test = drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_TEST_ONLY, NULL);
+        if (test != 0) {
+            fprintf(stderr, "[kms-hdr] atomic TEST_ONLY rejected color pipeline: "
+                            "%s — skipping commit\n", strerror(errno));
+            ret = test;
+        } else {
+            ret = drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_NONBLOCK, NULL);
+            printf("AMD/Intel color pipeline commit ret=%d  errno=%d (%s)\n",
+                   ret, errno, ret ? strerror(errno) : "ok");
+        }
         drmModeAtomicFree(req);
     }
 

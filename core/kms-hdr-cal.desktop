@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=HDR Calibration
+GenericName=HDR & Colour Calibration
+Comment=Calibrate HDR, gamut, white balance and tone-mapping for kms-hdr
+Exec=kms-hdr-cal
+Icon=preferences-desktop-display
+Terminal=false
+Categories=Settings;HardwareSettings;System;
+Keywords=HDR;color;colour;calibration;gamut;white balance;display;

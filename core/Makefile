@@ -9,14 +9,11 @@ all: kms-hdr
 kms-hdr: kms-hdr.c
 	$(CC) $(CFLAGS) -o $@ $< $(LIBS)
 
-CALDIR  ?= /usr/local/lib/kms-hdr
-
 install: kms-hdr
 	install -Dm755 kms-hdr                      $(DESTDIR)$(PREFIX)/bin/kms-hdr
 	install -Dm755 hdr-game                     $(DESTDIR)$(PREFIX)/bin/hdr-game
 	install -Dm644 kms-hdr.service              $(DESTDIR)$(SVCDIR)/kms-hdr.service
 	install -Dm644 kms-hdr.policy               $(DESTDIR)$(POLKIT)/ru.sigmachan.kms-hdr.policy
-	install -Dm755 hdr-cal.py                   $(DESTDIR)$(CALDIR)/hdr-cal.py
 
 enable: install
 	systemctl daemon-reload
@@ -30,7 +27,6 @@ uninstall: disable
 	rm -f $(DESTDIR)$(PREFIX)/bin/hdr-game
 	rm -f $(DESTDIR)$(SVCDIR)/kms-hdr.service
 	rm -f $(DESTDIR)$(POLKIT)/ru.sigmachan.kms-hdr.policy
-	rm -rf $(DESTDIR)$(CALDIR)
 	systemctl daemon-reload
 
 clean:
