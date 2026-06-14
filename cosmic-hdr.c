@@ -30,6 +30,7 @@
 #include <sys/ioctl.h>
 #include <sys/select.h>
 #include <sys/inotify.h>
+#include <sys/wait.h>
 #include <linux/vt.h>
 
 #include <xf86drm.h>
@@ -108,15 +109,20 @@ static void load_conf(int *sdr_nits, int *peak_nits, int *gamut_pct,
 static void save_conf(int sdr_nits, int peak_nits, int gamut_pct,
                       int gamut_mode, int max_bpc, int saturation,
                       int oled_dim_min, int midtone_gamma, int force_oled) {
-    FILE *f = fopen(CONF_PATH, "w");
-    if (!f) { perror("save_conf: fopen " CONF_PATH); return; }
-    fprintf(f,
+    const char *tmp = CONF_PATH ".tmp";
+    FILE *f = fopen(tmp, "w");
+    if (!f) { perror("save_conf: fopen " CONF_PATH ".tmp"); return; }
+    int n = fprintf(f,
         "SDR_NITS=%d\nPEAK_NITS=%d\nGAMUT=%d\nMAX_BPC=%d\n"
         "GAMUT_MODE=%s\nSATURATION=%d\nOLED_DIM_MIN=%d\nMIDTONE_GAMMA=%d\nFORCE_OLED=%d\n",
         sdr_nits, peak_nits, gamut_pct, max_bpc,
         gamut_mode == 1 ? "dci-p3" : (gamut_mode == 2 ? "srgb" : "bt2020"),
         saturation, oled_dim_min, midtone_gamma, force_oled);
-    fclose(f);
+    if (n < 0) { perror("save_conf: fprintf"); fclose(f); unlink(tmp); return; }
+    fflush(f);
+    fsync(fileno(f));
+    if (fclose(f) != 0) { perror("save_conf: fclose"); unlink(tmp); return; }
+    if (rename(tmp, CONF_PATH) != 0) { perror("save_conf: rename"); unlink(tmp); return; }
     printf("saved: %s\n", CONF_PATH);
 }
 
@@ -228,6 +234,7 @@ static double clamp01(double v) { return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); }
 /* DEGAMMA: sRGB gamma → linear [0,1] */
 static drm_lut_entry *build_degamma_srgb(int n) {
     drm_lut_entry *lut = calloc(n, sizeof(*lut));
+    if (!lut) return NULL;
     for (int i = 0; i < n; i++) {
         double x = (double)i / (n - 1);
         uint16_t v = (uint16_t)(clamp01(srgb_to_linear(x)) * 65535.0 + 0.5);
@@ -244,6 +251,7 @@ static drm_lut_entry *build_degamma_srgb(int n) {
  */
 static drm_lut_entry *build_gamma_pq(int n, double sdr_nits, double midtone_gamma) {
     drm_lut_entry *lut = calloc(n, sizeof(*lut));
+    if (!lut) return NULL;
     double scale = sdr_nits / 10000.0;
     double g = midtone_gamma / 100.0;
     for (int i = 0; i < n; i++) {
@@ -260,6 +268,7 @@ static drm_lut_entry *build_gamma_pq(int n, double sdr_nits, double midtone_gamm
 /* Identity LUT for reset */
 static drm_lut_entry *build_linear_lut(int n) {
     drm_lut_entry *lut = calloc(n, sizeof(*lut));
+    if (!lut) return NULL;
     for (int i = 0; i < n; i++) {
         uint16_t v = (uint16_t)((double)i / (n - 1) * 65535.0 + 0.5);
         lut[i].r = lut[i].g = lut[i].b = v;
@@ -278,6 +287,13 @@ static const double CTM_709_TO_DCIP3[3][3] = {
     { 0.822461,  0.177538,  0.000000 },
     { 0.033195,  0.966805,  0.000000 },
     { 0.017083,  0.072397,  0.910520 },
+};
+
+/* sRGB/BT.709 → BT.709 = identity (no gamut expansion) */
+static const double CTM_IDENTITY[3][3] = {
+    { 1.000000,  0.000000,  0.000000 },
+    { 0.000000,  1.000000,  0.000000 },
+    { 0.000000,  0.000000,  1.000000 },
 };
 
 static void build_ctm(const double m[3][3], uint64_t out[9]) {
@@ -346,9 +362,13 @@ static hdr_meta_t build_hdr_meta(int peak_nits, int sdr_nits) {
 static int set_nvidia_gamma_pq(int fd, uint32_t crtc_id, double sdr_nits,
                                 double midtone_gamma, int reset) {
     drmModeCrtcPtr crtc = drmModeGetCrtc(fd, crtc_id);
-    if (!crtc || crtc->gamma_size == 0) {
-        if (crtc) drmModeFreeCrtc(crtc);
+    if (!crtc) {
         fprintf(stderr, "NVIDIA gamma: crtc has no gamma table\n");
+        return -1;
+    }
+    if (crtc->gamma_size <= 1) {
+        drmModeFreeCrtc(crtc);
+        fprintf(stderr, "[kms-hdr] NVIDIA gamma_size too small\n");
         return -1;
     }
     uint32_t gs = crtc->gamma_size;
@@ -357,6 +377,7 @@ static int set_nvidia_gamma_pq(int fd, uint32_t crtc_id, double sdr_nits,
     uint16_t *r = malloc(gs * sizeof(uint16_t));
     uint16_t *g = malloc(gs * sizeof(uint16_t));
     uint16_t *b = malloc(gs * sizeof(uint16_t));
+    if (!r || !g || !b) { free(r); free(g); free(b); return -1; }
     double gv = midtone_gamma / 100.0;
 
     for (uint32_t i = 0; i < gs; i++) {
@@ -416,7 +437,10 @@ static uint64_t get_enum_val(int fd, uint32_t prop_id, const char *enum_name) {
 
 static uint32_t mk_blob(int fd, const void *data, size_t sz) {
     uint32_t id = 0;
-    drmModeCreatePropertyBlob(fd, data, sz, &id);
+    if (drmModeCreatePropertyBlob(fd, data, sz, &id) != 0 || id == 0) {
+        fprintf(stderr, "[kms-hdr] drmModeCreatePropertyBlob failed: %s\n", strerror(errno));
+        return 0;
+    }
     return id;
 }
 
@@ -638,7 +662,8 @@ static int do_apply(ApplyCtx *ctx) {
         gam_lut = build_gamma_pq(LUT_SIZE, (double)sdr_nits, (double)midtone_gamma);
         double t = gamut_pct / 100.0;
         double gamut_mat[3][3];
-        const double (*target)[3] = (gamut_mode == 1) ? CTM_709_TO_DCIP3 : CTM_709_TO_2020;
+        const double (*target)[3] = (gamut_mode == 1) ? CTM_709_TO_DCIP3 :
+                                    (gamut_mode == 2) ? CTM_IDENTITY     : CTM_709_TO_2020;
         for (int r = 0; r < 3; r++)
             for (int c = 0; c < 3; c++)
                 gamut_mat[r][c] = (r==c ? 1.0 : 0.0) * (1.0-t) + target[r][c] * t;
@@ -649,11 +674,26 @@ static int do_apply(ApplyCtx *ctx) {
         build_ctm((const double(*)[3])combined, ctm9);
     }
 
+    if (!deg_lut || !gam_lut) {
+        fprintf(stderr, "[kms-hdr] LUT allocation failed\n");
+        free(deg_lut); free(gam_lut);
+        drmDropMaster(fd); close(fd); VT_CLEANUP(); return 1;
+    }
+
     uint32_t deg_blob = mk_blob(fd, deg_lut, LUT_SIZE * sizeof(drm_lut_entry));
     uint32_t gam_blob = mk_blob(fd, gam_lut, LUT_SIZE * sizeof(drm_lut_entry));
     uint32_t ctm_blob = mk_blob(fd, ctm9, sizeof(ctm9));
     free(deg_lut); free(gam_lut);
     printf("blobs: DEGAMMA=%u CTM=%u GAMMA=%u\n", deg_blob, ctm_blob, gam_blob);
+
+    /* NVIDIA path uses legacy gamma, not these blobs — only require them on AMD/Intel */
+    if (!is_nvidia && (!deg_blob || !ctm_blob || !gam_blob)) {
+        fprintf(stderr, "[kms-hdr] property blob creation failed\n");
+        if (deg_blob) drmModeDestroyPropertyBlob(fd, deg_blob);
+        if (ctm_blob) drmModeDestroyPropertyBlob(fd, ctm_blob);
+        if (gam_blob) drmModeDestroyPropertyBlob(fd, gam_blob);
+        drmDropMaster(fd); close(fd); VT_CLEANUP(); return 1;
+    }
 
     uint32_t p_deg    = get_prop_id(fd, crtc_id, DRM_MODE_OBJECT_CRTC,     "DEGAMMA_LUT");
     uint32_t p_ctm    = get_prop_id(fd, crtc_id, DRM_MODE_OBJECT_CRTC,     "CTM");
@@ -671,6 +711,13 @@ static int do_apply(ApplyCtx *ctx) {
                ret, errno, ret ? strerror(errno) : "ok");
     } else {
         drmModeAtomicReqPtr req = drmModeAtomicAlloc();
+        if (!req) {
+            fprintf(stderr, "[kms-hdr] drmModeAtomicAlloc failed\n");
+            if (deg_blob) drmModeDestroyPropertyBlob(fd, deg_blob);
+            if (ctm_blob) drmModeDestroyPropertyBlob(fd, ctm_blob);
+            if (gam_blob) drmModeDestroyPropertyBlob(fd, gam_blob);
+            drmDropMaster(fd); close(fd); VT_CLEANUP(); return 1;
+        }
         if (p_deg) drmModeAtomicAddProperty(req, crtc_id, p_deg, reset ? 0 : deg_blob);
         if (p_ctm) drmModeAtomicAddProperty(req, crtc_id, p_ctm, reset ? 0 : ctm_blob);
         if (p_gam) drmModeAtomicAddProperty(req, crtc_id, p_gam, reset ? 0 : gam_blob);
@@ -706,6 +753,13 @@ static int do_apply(ApplyCtx *ctx) {
             }
             if (vrr_saved) {
                 drmModeAtomicReqPtr vrr_req = drmModeAtomicAlloc();
+                if (!vrr_req) {
+                    fprintf(stderr, "[kms-hdr] drmModeAtomicAlloc (vrr disable) failed\n");
+                    if (deg_blob) drmModeDestroyPropertyBlob(fd, deg_blob);
+                    if (ctm_blob) drmModeDestroyPropertyBlob(fd, ctm_blob);
+                    if (gam_blob) drmModeDestroyPropertyBlob(fd, gam_blob);
+                    drmDropMaster(fd); close(fd); VT_CLEANUP(); return 1;
+                }
                 drmModeAtomicAddProperty(vrr_req, conn_id, p_vrr, 0);
                 drmModeAtomicCommit(fd, vrr_req, DRM_MODE_ATOMIC_NONBLOCK, NULL);
                 drmModeAtomicFree(vrr_req);
@@ -722,6 +776,15 @@ static int do_apply(ApplyCtx *ctx) {
         }
 
         drmModeAtomicReqPtr req2 = drmModeAtomicAlloc();
+        if (!req2) {
+            fprintf(stderr, "[kms-hdr] drmModeAtomicAlloc (hdr commit) failed\n");
+            if (hdr_blob)  drmModeDestroyPropertyBlob(fd, hdr_blob);
+            if (mode_blob) drmModeDestroyPropertyBlob(fd, mode_blob);
+            if (deg_blob)  drmModeDestroyPropertyBlob(fd, deg_blob);
+            if (ctm_blob)  drmModeDestroyPropertyBlob(fd, ctm_blob);
+            if (gam_blob)  drmModeDestroyPropertyBlob(fd, gam_blob);
+            drmDropMaster(fd); close(fd); VT_CLEANUP(); return 1;
+        }
         if (p_crtc_id)       drmModeAtomicAddProperty(req2, conn_id, p_crtc_id,  crtc_id);
                               drmModeAtomicAddProperty(req2, conn_id, p_hdr,      hdr_blob);
                               drmModeAtomicAddProperty(req2, conn_id, p_cspace,   cspace_val);
@@ -745,6 +808,13 @@ static int do_apply(ApplyCtx *ctx) {
         if (p_vrr && vrr_saved && hdr_ret == 0) {
             usleep(100000);
             drmModeAtomicReqPtr vrr_req = drmModeAtomicAlloc();
+            if (!vrr_req) {
+                fprintf(stderr, "[kms-hdr] drmModeAtomicAlloc (vrr restore) failed\n");
+                if (deg_blob) drmModeDestroyPropertyBlob(fd, deg_blob);
+                if (ctm_blob) drmModeDestroyPropertyBlob(fd, ctm_blob);
+                if (gam_blob) drmModeDestroyPropertyBlob(fd, gam_blob);
+                drmDropMaster(fd); close(fd); VT_CLEANUP(); return 1;
+            }
             drmModeAtomicAddProperty(vrr_req, conn_id, p_vrr, vrr_saved);
             int vrr_ret = drmModeAtomicCommit(fd, vrr_req, DRM_MODE_ATOMIC_NONBLOCK, NULL);
             drmModeAtomicFree(vrr_req);
@@ -781,11 +851,32 @@ static int do_apply(ApplyCtx *ctx) {
         }
 
         if (!reset && access("/dev/cec0", F_OK) == 0) {
-            int cec = system("cec-ctl --device=0 --active-source phys-addr=0.0.0.0"
-                             " >/dev/null 2>&1");
-            printf("HDMI-CEC: %s\n", cec == 0
-                   ? "active-source announced ✓"
-                   : "cec-ctl not found — install v4l-utils for CEC control");
+            const char *cec_bin = NULL;
+            if      (access("/usr/bin/cec-ctl",       X_OK) == 0) cec_bin = "/usr/bin/cec-ctl";
+            else if (access("/usr/local/bin/cec-ctl", X_OK) == 0) cec_bin = "/usr/local/bin/cec-ctl";
+
+            if (!cec_bin) {
+                printf("HDMI-CEC: cec-ctl not found — install v4l-utils for CEC control\n");
+            } else {
+                pid_t pid = fork();
+                if (pid == 0) {
+                    /* child: silence output, exec absolute-path cec-ctl */
+                    int devnull = open("/dev/null", O_WRONLY);
+                    if (devnull >= 0) { dup2(devnull, 1); dup2(devnull, 2); close(devnull); }
+                    execl(cec_bin, "cec-ctl", "--device=0", "--active-source",
+                          "phys-addr=0.0.0.0", (char *)NULL);
+                    _exit(127);
+                } else if (pid > 0) {
+                    int status = 0;
+                    waitpid(pid, &status, 0);
+                    int ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+                    printf("HDMI-CEC: %s\n", ok
+                           ? "active-source announced ✓"
+                           : "cec-ctl failed");
+                } else {
+                    perror("HDMI-CEC: fork");
+                }
+            }
         }
     } else {
         printf("pipeline ret=%d  HDR ret=%d\n", ret, hdr_ret);
@@ -802,8 +893,35 @@ static int do_apply(ApplyCtx *ctx) {
  * Panel sends reload via: pkexec kms-hdr --reload
  */
 static void run_daemon(ApplyCtx *base_ctx) {
-    FILE *pf = fopen(PID_FILE, "w");
-    if (pf) { fprintf(pf, "%d\n", getpid()); fclose(pf); }
+    int pfd;
+    for (;;) {
+        pfd = open(PID_FILE, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+        if (pfd >= 0) break;
+        if (errno != EEXIST) { perror("run_daemon: open " PID_FILE); return; }
+
+        /* PID file exists — check if the recorded daemon is still alive */
+        FILE *ex = fopen(PID_FILE, "r");
+        int old_pid = 0;
+        if (ex) { if (fscanf(ex, "%d", &old_pid) != 1) old_pid = 0; fclose(ex); }
+
+        char procpath[64];
+        snprintf(procpath, sizeof(procpath), "/proc/%d", old_pid);
+        if (old_pid > 0 && access(procpath, F_OK) == 0) {
+            fprintf(stderr, "daemon already running (PID %d)\n", old_pid);
+            return;
+        }
+        /* stale PID file — remove and retry */
+        if (unlink(PID_FILE) != 0 && errno != ENOENT) {
+            perror("run_daemon: unlink stale " PID_FILE);
+            return;
+        }
+    }
+    {
+        char pidbuf[32];
+        int len = snprintf(pidbuf, sizeof(pidbuf), "%d\n", getpid());
+        if (len > 0) { ssize_t w = write(pfd, pidbuf, (size_t)len); (void)w; }
+        close(pfd);
+    }
 
     signal(SIGUSR1, sigusr1_handler);
     signal(SIGTERM, SIG_DFL); /* clean exit on SIGTERM */
@@ -933,6 +1051,7 @@ int main(int argc, char **argv) {
         }
         else if (strcmp(argv[i], "--dim-to") == 0 && i+1 < argc) {
             int n = atoi(argv[++i]);
+            if (n < 1) { fprintf(stderr, "[kms-hdr] --dim-to: value must be >= 1\n"); return 1; }
             ctx.sdr_nits  = n;
             ctx.peak_nits = n * 4;
             ctx.explicit_peak = 1;

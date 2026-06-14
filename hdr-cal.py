@@ -9,12 +9,14 @@ Usage:
 Patterns: black darkgray gray50 white red green blue sdr_hdr
 """
 
-import sys, math, subprocess
+import sys, math, subprocess, traceback
+import cairo
 import gi
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, Gdk, GLib
 
 BIN = '/usr/local/bin/kms-hdr'
+GAMUT_MODES = {'bt2020', 'dci-p3', 'srgb'}
 
 # ── Colour helpers ─────────────────────────────────────────────────────────────
 
@@ -207,10 +209,12 @@ def draw_peak_nits(cr, w, h, sdr_nits, peak_nits):
     # Label on SDR box
     cr.set_source_rgba(0, 0, 0, 0.6)
     cr.select_font_face('sans-serif', 0, 0)
-    cr.set_font_size(min(w, h) * 0.015)
-    lbl = f'SDR white\n{sdr_nits} nits'
-    cr.move_to(ref_x + 10, ref_y + ref_h / 2)
-    cr.show_text(lbl)
+    fs = min(w, h) * 0.015
+    cr.set_font_size(fs)
+    cr.move_to(ref_x + 10, ref_y + ref_h / 2 - fs * 0.6)
+    cr.show_text('SDR white')
+    cr.move_to(ref_x + 10, ref_y + ref_h / 2 + fs * 0.7)
+    cr.show_text(f'{sdr_nits} nits')
 
     # Specular highlight box (right) — slightly larger to show it's "brighter"
     hl_w = w * 0.18
@@ -302,7 +306,7 @@ def draw_midtone(cr, w, h, midtone_gamma):
     mid_x = w / 2
     # Apply gamma curve visualisation: for neutral (100%), the midpoint is at 50%.
     # For gamma > 100% (more punch), midtones get darker (curve bows down).
-    gamma = midtone_gamma / 100.0
+    gamma = max(midtone_gamma, 1) / 100.0
     adj_x = mid_x + (mid_x - mid_x * (0.5 ** (1.0 / gamma))) * 0.4
 
     # Midtone reference line
@@ -345,7 +349,6 @@ def _rounded_rect(cr, x, y, w, h, r):
 
 
 def _linear_grad(cr, x0, y0, x1, y1):
-    import cairo
     return cairo.LinearGradient(x0, y0, x1, y1)
 
 
@@ -410,8 +413,11 @@ class WizardWindow(Gtk.ApplicationWindow):
         self._midtone     = midtone_gamma
         self._step_idx    = 0
         self._pending     = False
+        self._debounce_id = 0
+        self._live_proc   = None
 
         self.set_css_classes(['wiz-root'])
+        self.connect('close-request', self._on_close)
 
         key = Gtk.EventControllerKey()
         key.connect('key-pressed', self._on_key)
@@ -509,9 +515,7 @@ class WizardWindow(Gtk.ApplicationWindow):
             self._do_apply(save=True)
             self._app.quit()
             return
-        if step == 'intro':
-            self._step_idx += 1
-        else:
+        if self._step_idx < len(STEPS) - 1:
             self._step_idx += 1
         self._refresh_step()
 
@@ -529,7 +533,6 @@ class WizardWindow(Gtk.ApplicationWindow):
 
     def _refresh_step(self):
         step = STEPS[self._step_idx]
-        n_content = len([s for s in STEPS if s not in ('intro', 'done')])
 
         # Update dots
         for child in list(self._dots_box):
@@ -604,16 +607,36 @@ class WizardWindow(Gtk.ApplicationWindow):
         self._da.queue_draw()
         if not self._pending:
             self._pending = True
-            GLib.timeout_add(250, self._live_apply)
+            self._debounce_id = GLib.timeout_add(250, self._live_apply)
 
     def _live_apply(self):
+        self._debounce_id = 0
         self._pending = False
         self._do_apply(save=False)
+        return GLib.SOURCE_REMOVE
+
+    def _on_close(self, *_):
+        if self._debounce_id:
+            GLib.source_remove(self._debounce_id)
+            self._debounce_id = 0
+        if self._live_proc is not None:
+            try:
+                self._live_proc.kill()
+            except ProcessLookupError:
+                pass
         return False
 
     def _do_apply(self, save=False):
         flag = '--save' if save else '--no-vt-switch'
-        subprocess.Popen([
+        # Reap the previous live-preview process before spawning another, so
+        # pkexec invocations don't stack up while the user drags a slider.
+        if not save and self._live_proc is not None:
+            try:
+                self._live_proc.kill()
+                self._live_proc.wait(timeout=1)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                pass
+        cmd = [
             'pkexec', BIN,
             flag,
             '--sdr-nits',      str(self._sdr_nits),
@@ -622,11 +645,31 @@ class WizardWindow(Gtk.ApplicationWindow):
             '--bpc',           str(self._bpc),
             '--gamut-mode',    self._gamut_mode,
             '--midtone-gamma', str(self._midtone),
-        ])
+        ]
+        proc = subprocess.Popen(cmd, close_fds=True)
+        if save:
+            proc.wait()
+        else:
+            self._live_proc = proc
 
     # ── Drawing ────────────────────────────────────────────────────────────────
 
     def _draw_step(self, widget, cr, w, h):
+        try:
+            self._draw_step_body(cr, w, h)
+        except Exception as exc:
+            traceback.print_exc()
+            cr.set_source_rgb(0.18, 0.0, 0.0)
+            cr.paint()
+            cr.set_source_rgb(1, 1, 1)
+            cr.select_font_face('sans-serif', 0, 0)
+            cr.set_font_size(min(w, h) * 0.02)
+            msg = f'Draw error: {exc}'
+            te = cr.text_extents(msg)
+            cr.move_to((w - te[2]) / 2, h / 2)
+            cr.show_text(msg)
+
+    def _draw_step_body(self, cr, w, h):
         step = STEPS[self._step_idx]
         if step == 'intro':
             cr.set_source_rgb(0.03, 0.03, 0.03)
@@ -673,11 +716,18 @@ class WizardWindow(Gtk.ApplicationWindow):
                 cr.show_text(line)
 
 
+_CSS_LOADED = False
+
+
 def _apply_css():
+    global _CSS_LOADED
+    if _CSS_LOADED:
+        return
     css = Gtk.CssProvider()
     css.load_from_string(CSS)
     Gtk.StyleContext.add_provider_for_display(
         Gdk.Display.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    _CSS_LOADED = True
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
@@ -687,16 +737,32 @@ def _get_arg(args, flag, default):
     except (ValueError, IndexError): return str(default)
 
 
+def _get_int_arg(args, flag, default, lo, hi):
+    raw = _get_arg(args, flag, default)
+    try:
+        v = int(raw)
+    except ValueError:
+        print(f'hdr-cal: invalid value {raw!r} for {flag}; using default {default}',
+              file=sys.stderr)
+        v = default
+    return min(max(v, lo), hi)
+
+
 def main():
     args = sys.argv[1:]
 
     if '--calibrate' in args:
-        sdr_nits      = int(_get_arg(args, '--sdr-nits',      203))
-        peak_nits     = int(_get_arg(args, '--peak-nits',     800))
-        gamut         = int(_get_arg(args, '--gamut',         100))
-        bpc           = int(_get_arg(args, '--bpc',            10))
+        sdr_nits      = _get_int_arg(args, '--sdr-nits',      203,   80, 400)
+        peak_nits     = _get_int_arg(args, '--peak-nits',     800,  400, 1600)
+        gamut         = _get_int_arg(args, '--gamut',         100,    0, 100)
+        bpc           = _get_int_arg(args, '--bpc',            10,    6, 16)
         gamut_mode    = _get_arg(args, '--gamut-mode',    'bt2020')
-        midtone_gamma = int(_get_arg(args, '--midtone-gamma', 100))
+        midtone_gamma = max(1, _get_int_arg(args, '--midtone-gamma', 100, 1, 250))
+
+        if gamut_mode not in GAMUT_MODES:
+            print(f'hdr-cal: invalid --gamut-mode {gamut_mode!r}; using bt2020',
+                  file=sys.stderr)
+            gamut_mode = 'bt2020'
 
         def on_activate(app):
             WizardWindow(app, sdr_nits, peak_nits, gamut, bpc, gamut_mode, midtone_gamma).present()
