@@ -31,6 +31,12 @@
 /* ── config ──────────────────────────────────────────────────────────────── */
 #define DRM_DEV       "/dev/dri/card1"
 
+/* A85H OLED peak brightness. Controls tone-mapper aggression:
+ * - Too high (10000) → TV boosts everything, too bright on desktop.
+ * - Match to display peak → near 1:1 mapping, natural HDR look.
+ * Hisense A85H spec: ~800 nits typical, ~1000 nits peak boost. */
+#define DISPLAY_PEAK_NITS  1000
+
 /*
  * BT.709 → BT.2020 gamut expansion matrix.
  * Derived from: (BT.2020←XYZ) × (XYZ←BT.709), D65 whitepoint.
@@ -92,12 +98,12 @@ static hdr_meta_t build_hdr_meta(void) {
     m.display_primaries[2][1] = (uint16_t)(0.292 * 50000);  /* R y */
     m.white_point[0] = (uint16_t)(0.3127 * 50000);          /* D65 */
     m.white_point[1] = (uint16_t)(0.3290 * 50000);
-    /* HDR10 reference mastering display — forces the TV's tone-mapper to open up fully.
-     * 10000 nit peak + 0.0001 nit OLED black = maximum contrast range declaration. */
-    m.max_display_mastering_luminance = 10000;               /* cd/m² units × 1    */
+    /* Declare mastering at the display's own peak so the tone-mapper is near 1:1.
+     * MaxCLL == display peak = no aggressive boost; OLED black = max contrast ratio. */
+    m.max_display_mastering_luminance = DISPLAY_PEAK_NITS;   /* cd/m² units × 1    */
     m.min_display_mastering_luminance = 1;                   /* 0.0001 cd/m² × 10k */
-    m.max_content_light_level = 10000;                       /* MaxCLL: HDR10 max  */
-    m.max_frame_average_light_level = 400;                   /* MaxFALL: typical scene */
+    m.max_content_light_level = DISPLAY_PEAK_NITS;           /* MaxCLL             */
+    m.max_frame_average_light_level = 200;                   /* MaxFALL            */
     return m;
 }
 
