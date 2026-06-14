@@ -1,4 +1,4 @@
-# cosmic-hdr
+# kms-hdr
 
 HDR10 color pipeline injector for Linux — COSMIC Desktop, KDE Plasma 6, or any compositor.
 
@@ -8,7 +8,7 @@ Brings HDR, wide-gamut (BT.2020 / DCI-P3 D65), and 10/12-bit output to Linux des
 
 ## Automatic defaults
 
-On first run, cosmic-hdr reads your display's EDID and picks the best settings automatically:
+On first run, kms-hdr reads your display's EDID and picks the best settings automatically:
 
 - **Peak nits** — taken from the EDID HDR Static Metadata luminance field. Falls back to 800 nits (safe for most HDR OLED/QLED panels) if the EDID field is unset.
 - **SDR white** — 203 nits (ITU-R BT.2408 reference, the broadcast standard for SDR-in-HDR). This is the value the panel's interactive calibration helps you fine-tune if needed.
@@ -36,7 +36,7 @@ The GUI panel shows everything derived from EDID — interface version (HDMI 2.1
 | FSR / NIS / DLSS upscaling | — | — | ✓ (Gamescope) |
 | DLDSR | — | — | ✓ |
 
-¹ NVIDIA's KMS driver does not expose the DRM CTM / DEGAMMA_LUT / GAMMA_LUT CRTC properties needed for full colour-pipeline control. On NVIDIA, cosmic-hdr falls back to a legacy 1D PQ gamma ramp via `drmModeCrtcSetGamma()` — the same technique KWin Plasma 6 uses on NVIDIA. BT.2020 / DCI-P3 gamut expansion and saturation are silently skipped. Use `hdr-game` for full feature support in games.
+¹ NVIDIA's KMS driver does not expose the DRM CTM / DEGAMMA_LUT / GAMMA_LUT CRTC properties needed for full colour-pipeline control. On NVIDIA, kms-hdr falls back to a legacy 1D PQ gamma ramp via `drmModeCrtcSetGamma()` — the same technique KWin Plasma 6 uses on NVIDIA. BT.2020 / DCI-P3 gamut expansion and saturation are silently skipped. Use `hdr-game` for full feature support in games.
 
 ---
 
@@ -44,11 +44,11 @@ The GUI panel shows everything derived from EDID — interface version (HDMI 2.1
 
 | Component | Location | Description |
 |-----------|----------|-------------|
-| `cosmic-hdr` | `/usr/local/bin/cosmic-hdr` | KMS binary — runs as root via polkit |
-| `cosmic-hdr-panel` | `/usr/local/bin/cosmic-hdr-panel` | libcosmic settings panel |
-| `hdr-cal.py` | `/usr/local/lib/cosmic-hdr/hdr-cal.py` | GTK4 calibration / test-pattern overlay |
-| `cosmic-hdr.service` | systemd | Applies HDR at login, resets at logout |
-| `cosmic-hdr.policy` | polkit | Allows the active session to invoke the binary without a password prompt |
+| `kms-hdr` | `/usr/local/bin/kms-hdr` | KMS binary — runs as root via polkit |
+| `kms-hdr-panel` | `/usr/local/bin/kms-hdr-panel` | libcosmic settings panel |
+| `hdr-cal.py` | `/usr/local/lib/kms-hdr/hdr-cal.py` | GTK4 calibration / test-pattern overlay |
+| `kms-hdr.service` | systemd | Applies HDR at login, resets at logout |
+| `kms-hdr.policy` | polkit | Allows the active session to invoke the binary without a password prompt |
 
 ---
 
@@ -79,7 +79,7 @@ The HDMI Forum VSDB (OUI `0xC45D00`) carries the `Max TMDS Character Rate` field
 
 **Does it work?** Yes, on AMD and Intel.
 
-When you select `DCI-P3 D65` as the Target Gamut, cosmic-hdr computes and loads a 3×3 CTM that maps sRGB primaries to DCI-P3 D65 primaries into the GPU's display engine. All desktop content — not just video — is rendered with the wider colour gamut. This is the same P3 colour space used by Apple displays and modern HDR TVs.
+When you select `DCI-P3 D65` as the Target Gamut, kms-hdr computes and loads a 3×3 CTM that maps sRGB primaries to DCI-P3 D65 primaries into the GPU's display engine. All desktop content — not just video — is rendered with the wider colour gamut. This is the same P3 colour space used by Apple displays and modern HDR TVs.
 
 Note: `DCI-P3 D65` uses the standard D65 white point (6504 K), matching sRGB and BT.2020. The cinema native `P3-ST 431-2` (D63, 6300 K) is intentionally not exposed — it's too warm for desktop use and only correct for cinema projection booths.
 
@@ -93,7 +93,7 @@ On **NVIDIA**, the gamut mode is ignored silently — the NVIDIA KMS driver does
 
 The panel detects whether `/dev/cec0` exists (Linux kernel CEC framework, exposed by GPU drivers that support it). The badge in the Display panel shows `CEC ✓` or `CEC —`.
 
-CEC is a separate sideband channel on the HDMI cable. It cannot toggle HDR mode — the display switches to HDR by reading the HDR10 InfoFrame embedded in the video signal, which is exactly what cosmic-hdr sets via `HDR_OUTPUT_METADATA`. CEC and HDR metadata are completely independent.
+CEC is a separate sideband channel on the HDMI cable. It cannot toggle HDR mode — the display switches to HDR by reading the HDR10 InfoFrame embedded in the video signal, which is exactly what kms-hdr sets via `HDR_OUTPUT_METADATA`. CEC and HDR metadata are completely independent.
 
 What CEC _can_ do via `cec-ctl` (from `v4l-utils`):
 
@@ -147,15 +147,17 @@ Click anywhere or press **Esc** to close a test pattern.
 
 ```bash
 # C binary + service + polkit + calibration tool
-cd cosmic-hdr
+git clone https://github.com/Sigmachan/kms-hdr
+cd kms-hdr
 make
 sudo make install
-sudo make enable          # enables and starts cosmic-hdr.service
+sudo make enable          # enables and starts kms-hdr.service
 
-# Rust panel
-cd ../cosmic-hdr-panel
+# Rust panel (optional)
+git clone https://github.com/Sigmachan/kms-hdr-panel
+cd kms-hdr-panel
 cargo build --release
-sudo install -Dm755 target/release/cosmic-hdr-panel /usr/local/bin/cosmic-hdr-panel
+sudo install -Dm755 target/release/kms-hdr-panel /usr/local/bin/kms-hdr-panel
 ```
 
 **Dependencies:** `libdrm`, `python-gobject` (GTK4 Python bindings, for `hdr-cal.py`), `polkit`, `systemd`.
@@ -163,7 +165,7 @@ sudo install -Dm755 target/release/cosmic-hdr-panel /usr/local/bin/cosmic-hdr-pa
 ### Arch Linux (PKGBUILD)
 
 ```bash
-# Inside the cosmic-hdr directory
+# Inside the kms-hdr directory
 makepkg -si
 ```
 
@@ -218,7 +220,7 @@ hdr-game --no-smooth-motion --no-itm -- native-hdr-game
 --upscale fsr|nis|dlss|integer  Upscaling algorithm
 ```
 
-Defaults for `--vibrance`, `--width`, `--height`, `--fps` are read from `/etc/hdr-game.conf` (managed by `cosmic-hdr-panel`). If the file doesn't exist, built-in defaults apply.
+Defaults for `--vibrance`, `--width`, `--height`, `--fps` are read from `/etc/hdr-game.conf` (managed by `kms-hdr-panel`). If the file doesn't exist, built-in defaults apply.
 
 **`/etc/hdr-game.conf` keys:**
 
@@ -226,18 +228,18 @@ Defaults for `--vibrance`, `--width`, `--height`, `--fps` are read from `/etc/hd
 |-----|---------|-------------|
 | `SMOOTH_MOTION` | 1 | RTX Smooth Motion (0 or 1) |
 | `REFLEX` | 1 | NVIDIA Reflex via NvAPI (0 or 1) |
-| `VIBRANCE` | 200 | Digital vibrance, nvibrant scale -1024..1023 |
-| `UPSCALE` | none | `none` / `fsr` / `nis` / `dlss` / `integer` |
+| `VIBRANCE` | 0 | Digital vibrance, nvibrant scale -1024..1023 |
+| `UPSCALE` | fsr | `fsr` / `nis` / `integer` / `nearest` |
 | `DLDSR` | 0 | NVIDIA DLDSR (renders at 2.25× pixels, display native) |
-| `GAMESCOPE_W` | 3840 | Gamescope output width |
-| `GAMESCOPE_H` | 2160 | Gamescope output height |
-| `GAMESCOPE_R` | 120 | Gamescope target FPS |
+| `GS_WIDTH` | 3840 | Gamescope output width |
+| `GS_HEIGHT` | 2160 | Gamescope output height |
+| `GS_FPS` | 120 | Gamescope target FPS |
 
 ---
 
 ## Configuration
 
-Written to `/etc/cosmic-hdr.conf` by `cosmic-hdr --save ...` (runs as root via polkit):
+Written to `/etc/kms-hdr.conf` by `kms-hdr --save ...` (runs as root via polkit):
 
 ```ini
 SDR_NITS=203
@@ -246,6 +248,7 @@ GAMUT=100
 MAX_BPC=10
 GAMUT_MODE=bt2020
 SATURATION=100
+OLED_DIM_MIN=0
 ```
 
 | Key | Default | Description |
@@ -256,13 +259,14 @@ SATURATION=100
 | `MAX_BPC` | 10 | Bit depth requested via `max_requested_bpc` DRM property. |
 | `GAMUT_MODE` | bt2020 | Target colour space: `bt2020`, `dci-p3`, or `srgb`. |
 | `SATURATION` | 100 | Colour saturation via BT.709 matrix. 100 = neutral, 150 = vivid, 50 = muted. |
+| `OLED_DIM_MIN` | 0 | Auto-dim to 50 nit after N minutes idle (0 = disabled; requires swayidle). |
 
 ---
 
 ## CLI reference
 
 ```
-cosmic-hdr [OPTIONS] [COMMAND]
+kms-hdr [OPTIONS] [COMMAND]
 
 Commands:
   reset                     Reset to SDR (remove HDR metadata, restore gamma)
@@ -277,8 +281,9 @@ Options:
   --bpc <8|10|12>           Max requested bit depth (default: 10)
   --gamut-mode <mode>       bt2020 | dci-p3 | srgb (default: bt2020)
   --saturation <50-200>     Colour saturation % via BT.709 matrix (default: 100)
+  --dim-to <nits>           Set SDR=N, peak=N×4 — used by OLED auto-dim service
   --no-vt-switch            Skip VT switch to steal DRM master (for headless/boot use)
-  --save                    Write /etc/cosmic-hdr.conf before applying
+  --save                    Write /etc/kms-hdr.conf before applying
   --help                    Show this help
 ```
 
@@ -286,7 +291,7 @@ Options:
 
 ## VRR / FreeSync / G-Sync compatibility
 
-Applying HDR via a full modeset (`DRM_MODE_ATOMIC_ALLOW_MODESET`) while VRR is active causes a brief black flash as the display resyncs timing. cosmic-hdr avoids this:
+Applying HDR via a full modeset (`DRM_MODE_ATOMIC_ALLOW_MODESET`) while VRR is active causes a brief black flash as the display resyncs timing. kms-hdr avoids this:
 
 1. Reads the current `vrr_enabled` property value before committing.
 2. Disables VRR, applies the HDR pipeline.
