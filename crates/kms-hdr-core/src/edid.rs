@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 pub struct DisplayInfo {
     /// DRM connector name, e.g. `HDMI-A-1`.
     pub connector: String,
+    /// 3-letter PnP manufacturer ID from EDID bytes 8-9 (e.g. `GSM`, `SAM`).
+    pub manufacturer: Option<String>,
     /// Monitor product name from descriptor block 0xFC, if present.
     pub name: Option<String>,
     /// Desired/peak content luminance in nits, decoded from HDR metadata.
@@ -28,7 +30,28 @@ pub struct DisplayInfo {
     pub is_oled: bool,
 }
 
-/// Scan `/sys/class/drm` for the first connected display exposing an EDID.
+impl DisplayInfo {
+    /// True if the panel is an LG display (PnP `GSM`/`LGD`/`LGE`, or an `LG`
+    /// prefix in the product name). LG TVs report several of these.
+    pub fn is_lg(&self) -> bool {
+        let mfg_lg = matches!(
+            self.manufacturer.as_deref(),
+            Some("GSM") | Some("LGD") | Some("LGE")
+        );
+        let name_lg = self
+            .name
+            .as_deref()
+            .map(|n| n.to_uppercase().starts_with("LG"))
+            .unwrap_or(false);
+        mfg_lg || name_lg
+    }
+}
+
+/// Scan `/sys/class/drm` for a connected display exposing a usable EDID.
+///
+/// On multi-output systems (e.g. iGPU + dGPU) the first connected connector can
+/// be a stub with an empty/garbage EDID, so prefer one that actually parsed a
+/// product name or manufacturer; fall back to the first connected EDID otherwise.
 pub fn detect() -> Option<DisplayInfo> {
     let entries = fs::read_dir("/sys/class/drm").ok()?;
     let mut found: Vec<PathBuf> = entries
@@ -42,20 +65,30 @@ pub fn detect() -> Option<DisplayInfo> {
         })
         .collect();
     found.sort();
+
+    let mut fallback: Option<DisplayInfo> = None;
     for conn in found {
         let status = fs::read_to_string(conn.join("status")).unwrap_or_default();
         if status.trim() != "connected" {
             continue;
         }
-        let edid = fs::read(conn.join("edid")).ok()?;
+        // A read error on one connector must not abort the whole scan.
+        let Ok(edid) = fs::read(conn.join("edid")) else {
+            continue;
+        };
         if edid.len() < 128 {
             continue;
         }
         let mut info = parse(&edid);
         info.connector = connector_name(&conn);
-        return Some(info);
+        // A connector that identified itself wins immediately.
+        if info.name.is_some() || info.manufacturer.is_some() {
+            return Some(info);
+        }
+        // Otherwise keep the first usable EDID as a last resort.
+        fallback.get_or_insert(info);
     }
-    None
+    fallback
 }
 
 /// Strip the leading `cardN-` from a connector sysfs dir name.
@@ -74,6 +107,11 @@ fn connector_name(path: &Path) -> String {
 /// Parse a full EDID blob (base block + optional CTA-861 extensions).
 pub fn parse(edid: &[u8]) -> DisplayInfo {
     let mut info = DisplayInfo::default();
+
+    // Manufacturer PnP ID: EDID bytes 8-9, three packed 5-bit letters (1=A).
+    if edid.len() >= 10 {
+        info.manufacturer = decode_pnp_id(edid[8], edid[9]);
+    }
 
     // Descriptor blocks live at 0x36..0x6D, four 18-byte descriptors.
     for d in 0..4 {
@@ -110,6 +148,26 @@ pub fn parse(edid: &[u8]) -> DisplayInfo {
         }
     }
     info
+}
+
+/// Decode the EDID manufacturer ID (bytes 8-9) into its 3-letter PnP code.
+/// Returns `None` if the high bit is set or any letter is out of range.
+fn decode_pnp_id(b0: u8, b1: u8) -> Option<String> {
+    let raw = ((b0 as u16) << 8) | b1 as u16;
+    if raw & 0x8000 != 0 {
+        return None; // reserved high bit must be 0
+    }
+    let c1 = ((raw >> 10) & 0x1F) as u8;
+    let c2 = ((raw >> 5) & 0x1F) as u8;
+    let c3 = (raw & 0x1F) as u8;
+    let letter = |v: u8| -> Option<char> {
+        if (1..=26).contains(&v) {
+            Some((b'A' + v - 1) as char)
+        } else {
+            None
+        }
+    };
+    Some([letter(c1)?, letter(c2)?, letter(c3)?].iter().collect())
 }
 
 /// Parse a CTA-861 extension block's data-block collection.
@@ -193,6 +251,28 @@ mod tests {
         let info = parse(&[0u8; 128]);
         assert!(info.name.is_none());
         assert!(!info.bt2020);
+    }
+
+    #[test]
+    fn pnp_id_decodes_lg() {
+        // "GSM" = G(7) S(19) M(13) -> 0x1E6D
+        assert_eq!(decode_pnp_id(0x1E, 0x6D).as_deref(), Some("GSM"));
+        // reserved high bit set -> rejected
+        assert_eq!(decode_pnp_id(0x80, 0x00), None);
+    }
+
+    #[test]
+    fn is_lg_detects_manufacturer_and_name() {
+        let mut info = DisplayInfo {
+            manufacturer: Some("GSM".into()),
+            ..Default::default()
+        };
+        assert!(info.is_lg());
+        info.manufacturer = Some("SAM".into());
+        info.name = Some("LG TV SSCR2".into());
+        assert!(info.is_lg());
+        info.name = Some("HISENSE".into());
+        assert!(!info.is_lg());
     }
 
     #[test]

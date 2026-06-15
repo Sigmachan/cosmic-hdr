@@ -29,7 +29,8 @@ impl GamutMode {
         }
     }
 
-    pub fn from_str(s: &str) -> GamutMode {
+    /// Parse a persisted `GAMUT_MODE` value, defaulting to BT.2020.
+    pub fn from_conf_str(s: &str) -> GamutMode {
         match s.trim() {
             "dci-p3" => GamutMode::DciP3,
             "srgb" => GamutMode::Srgb,
@@ -159,7 +160,7 @@ impl Conf {
                     }
                 }
                 "TONEMAP_KNEE" => self.tonemap_knee = int(self.tonemap_knee),
-                "GAMUT_MODE" => self.gamut_mode = GamutMode::from_str(v),
+                "GAMUT_MODE" => self.gamut_mode = GamutMode::from_conf_str(v),
                 _ => {}
             }
         }

@@ -5,11 +5,13 @@ use crate::state::Shared;
 use gtk4::prelude::*;
 use gtk4::{Align, Box as GtkBox, DropDown, Label, Orientation, Scale, StringList, Switch};
 use kms_hdr_core::conf::{GamutMode, Tonemap};
+use kms_hdr_core::preset;
 use std::rc::Rc;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Step {
     Intro,
+    Panel,
     BlackLevel,
     Peak,
     WhiteRef,
@@ -22,6 +24,7 @@ pub enum Step {
 
 pub const STEPS: &[Step] = &[
     Step::Intro,
+    Step::Panel,
     Step::BlackLevel,
     Step::Peak,
     Step::WhiteRef,
@@ -36,6 +39,7 @@ impl Step {
     pub fn title(self) -> &'static str {
         match self {
             Step::Intro => "Welcome",
+            Step::Panel => "Panel preset",
             Step::BlackLevel => "Black level",
             Step::Peak => "Peak luminance",
             Step::WhiteRef => "SDR white reference",
@@ -50,6 +54,7 @@ impl Step {
     pub fn desc(self) -> &'static str {
         match self {
             Step::Intro => "Calibrate HDR & wide-gamut output for your display. Changes preview live.",
+            Step::Panel => "Start from a profile tuned for your panel, then fine-tune the steps that follow.",
             Step::BlackLevel => "Lift the shadow floor just enough to recover crushed near-blacks (OLED).",
             Step::Peak => "Set peak nits to your panel's true brightness using the clipping test.",
             Step::WhiteRef => "Set how bright SDR white (desktop/UI) appears in HDR mode.",
@@ -64,6 +69,7 @@ impl Step {
     pub fn pattern(self) -> Pattern {
         match self {
             Step::Intro => Pattern::Info,
+            Step::Panel => Pattern::Info,
             Step::BlackLevel => Pattern::BlackLevel,
             Step::Peak => Pattern::PeakClip,
             Step::WhiteRef => Pattern::WhiteRef,
@@ -153,6 +159,79 @@ pub fn build_controls(step: Step, shared: &Shared, notify: Rc<dyn Fn()>) -> GtkB
     match step {
         Step::Intro => {
             panel.append(&info_label(shared));
+        }
+        Step::Panel => {
+            // Recommend a preset from the detected display, if any.
+            let recommended = shared
+                .borrow()
+                .display
+                .as_ref()
+                .and_then(preset::recommend);
+            let rec_line = match recommended {
+                Some(p) => format!("Recommended for your panel: {}", p.label),
+                None => "No confident match — pick the closest panel below.".to_string(),
+            };
+            let rl = Label::new(Some(&rec_line));
+            rl.set_xalign(0.0);
+            rl.set_wrap(true);
+            panel.append(&rl);
+
+            let labels: Vec<&str> = preset::PRESETS.iter().map(|p| p.label).collect();
+            let list = StringList::new(&labels);
+            let dd = DropDown::new(Some(list), gtk4::Expression::NONE);
+            if let Some(rp) = recommended {
+                if let Some(idx) = preset::PRESETS.iter().position(|p| p.id == rp.id) {
+                    dd.set_selected(idx as u32);
+                }
+            }
+            // Per-preset rationale, kept in sync with the selection.
+            let desc = Label::new(None);
+            desc.set_xalign(0.0);
+            desc.set_wrap(true);
+            desc.add_css_class("dim-label");
+            let sync_desc = {
+                let desc = desc.clone();
+                move |i: usize| {
+                    if let Some(p) = preset::PRESETS.get(i) {
+                        desc.set_text(p.desc);
+                    }
+                }
+            };
+            sync_desc(dd.selected() as usize);
+
+            let row = GtkBox::new(Orientation::Horizontal, 8);
+            let l = Label::new(Some("Panel"));
+            l.set_xalign(0.0);
+            l.set_hexpand(true);
+            l.set_halign(Align::Start);
+            row.append(&l);
+            row.append(&dd);
+            panel.append(&row);
+            panel.append(&desc);
+
+            {
+                let sh = shared.clone();
+                let n = notify.clone();
+                dd.connect_selected_notify(move |d| {
+                    let i = d.selected() as usize;
+                    if let Some(p) = preset::PRESETS.get(i) {
+                        // Load the tuned config, but keep the EDID-reported peak
+                        // if the display advertised a higher real value. Copy the
+                        // peak out first so the immutable borrow is released
+                        // before the mutable one (no overlapping RefCell borrow).
+                        let edid_peak = sh.borrow().display.as_ref().and_then(|x| x.peak_nits);
+                        let mut c = p.conf();
+                        if let Some(ep) = edid_peak {
+                            if (ep as i32) > c.peak_nits {
+                                c.peak_nits = ep as i32;
+                            }
+                        }
+                        sh.borrow_mut().conf = c;
+                    }
+                    sync_desc(i);
+                    n();
+                });
+            }
         }
         Step::BlackLevel => {
             let sh = shared.clone();

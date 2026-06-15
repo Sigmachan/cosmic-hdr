@@ -52,26 +52,58 @@ The libcosmic settings panel and the cosmic-settings integration consume
 
 ## The calibration wizard
 
-`kms-hdr-cal` is a nine-step, eyeball-driven wizard that previews **live**
+`kms-hdr-cal` is a ten-step, eyeball-driven wizard that previews **live**
 through the injector — going beyond KDE's single-slider HDR calibration:
 
 1. **Display info** — EDID peak, advertised gamut/EOTF, OLED + GPU pipeline.
-2. **Black level** — PLUGE-style near-black patches to set the shadow floor
+2. **Panel preset** — a one-click factory-tuned starting point for the detected
+   panel (see below), then fine-tune the steps that follow.
+3. **Black level** — PLUGE-style near-black patches to set the shadow floor
    (OLED black-crush recovery).
-3. **Peak luminance** — the clipping-cross test: lower peak nits until the bright
+4. **Peak luminance** — the clipping-cross test: lower peak nits until the bright
    detail just disappears, finding the panel's true peak.
-4. **SDR white reference** — how bright SDR/desktop white appears in HDR.
-5. **Gamut & vividness** — output gamut + saturation, judged against a skin-tone
+5. **SDR white reference** — how bright SDR/desktop white appears in HDR.
+6. **Gamut & vividness** — output gamut + saturation, judged against a skin-tone
    patch.
-6. **White balance** — temperature (CCT) + tint against a neutral grey field.
+7. **White balance** — temperature (CCT) + tint against a neutral grey field.
    *KDE has no white-balance control.*
-7. **Midtone gamma** — a luminance ramp for contrast vs shadow detail.
-8. **Highlight roll-off** — soft BT.2390 knee instead of hard clipping.
+8. **Midtone gamma** — a luminance ramp for contrast vs shadow detail.
+9. **Highlight roll-off** — soft BT.2390 knee instead of hard clipping.
    *KDE has none.*
-9. **Summary & save** — apply and optionally store a named profile.
+10. **Summary & save** — apply and optionally store a named profile.
 
 Profiles are saved under `~/.config/kms-hdr/profiles/` in the same format as the
 system config, so any profile can be applied verbatim by the injector.
+
+## Panel presets
+
+The wizard reads the EDID manufacturer + product name and recommends a tuned
+profile, so a known panel is correct in one click. Each preset is just a starting
+[`Conf`] you can still fine-tune:
+
+| Preset | Panel | Peak | Gamut | Notes |
+|--------|-------|-----:|-------|-------|
+| `lg-g6` | LG G6 OLED (2026) | ~2700 | DCI-P3 | 4-stack tandem WOLED, provisional |
+| `lg-g5` | LG G5 OLED (2025) | ~2300 | DCI-P3 | Primary RGB Tandem WOLED |
+| `lg-c6` | LG C6 OLED (2026) | ~1300 | DCI-P3 | evo WOLED |
+| `woled` | Generic WOLED | ~800 | DCI-P3 | LG-display panel, model unknown |
+| `qd-oled` | Generic QD-OLED | ~1000 | BT.2020 | Samsung/Sony QD-OLED |
+| `oled` | Generic OLED | ~700 | DCI-P3 | unknown OLED |
+| `hisense-oled` | Hisense OLED | ~600 | DCI-P3 | — |
+| `oled-desktop` | OLED-safe desktop | ~600 | DCI-P3 | dim SDR white + fast auto-dim, longevity-first |
+
+LG WOLED covers ~96–99% DCI-P3 but only ~72–83% BT.2020, so the LG presets target
+DCI-P3 — BT.2020 expansion would overshoot what the panel can render. The presets
+assume the TV's own dynamic tone-mapping is **off** so the injector owns the PQ
+roll-off: on LG, set the input icon to **PC** or enable **HGiG** (Game Optimiser),
+otherwise the TV double-maps highlights. 2026 figures (G6/C6) are provisional and
+err low until measured; the wizard keeps the EDID-reported peak if it's higher.
+
+> **Panel lottery by size:** the bright 4-stack "Primary RGB Tandem" panel is not
+> in every size. G5/G6 are tandem at 55″+ (the 48″ is standard WOLED). The **C6 is
+> tandem only at 77″/83″** — 42–65″ C6 is standard WOLED (~1100–1200 nits, C-class),
+> *not* G-class. So a 65″ C6 behaves like `lg-c6`/`woled`, while a 77″ C6 is closer
+> to the G presets. Peak is a starting point; the clipping-cross step dials it in.
 
 ## Build & install
 

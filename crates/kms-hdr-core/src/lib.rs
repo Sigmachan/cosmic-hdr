@@ -10,11 +10,13 @@ pub mod apply;
 pub mod conf;
 pub mod edid;
 pub mod gpu;
+pub mod preset;
 pub mod profile;
 
 pub use conf::{Conf, GamutMode, Tonemap, CONF_PATH};
 pub use edid::DisplayInfo;
 pub use gpu::GpuVendor;
+pub use preset::{Preset, PRESETS};
 
 /// Color-temperature presets surfaced by calibration UIs (Kelvin).
 pub const TEMP_PRESETS: &[(&str, i32)] = &[
